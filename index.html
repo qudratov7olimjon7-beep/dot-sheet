@@ -51,6 +51,7 @@
     <label><input id="round" type="checkbox"> Round dots (zoomed)</label>
     <label>Upload image <input id="file" type="file" accept="image/*"></label>
     <button id="download" disabled>Download PNG</button>
+    <button id="copy" disabled>Copy image</button>
   </div>
   <div id="status">Type a prompt and press Generate, or upload an image.</div>
   <div class="stage" id="stage">
@@ -145,6 +146,7 @@ function render() {
   ctx.putImageData(img, 0, 0);
   if ($('round').checked) drawDots(bits);
   $('download').disabled = false;
+  $('copy').disabled = false;
 }
 
 // Zoomed view: each black pixel drawn as a circle on white.
@@ -275,6 +277,19 @@ $('round').addEventListener('change', () => {
   $('stage').classList.toggle('round', $('round').checked);
   render();
 });
+$('copy').addEventListener('click', () => {
+  const b = $('copy');
+  sheet.toBlob(async blob => {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      b.textContent = 'Copied!';
+    } catch (e) {
+      b.textContent = 'Copy failed';
+    }
+    setTimeout(() => { b.textContent = 'Copy image'; }, 1500);
+  }, 'image/png');
+});
+
 $('download').addEventListener('click', () => {
   downloadURL(sheet.toDataURL('image/png'), 'dot-sheet.png');
 });
