@@ -66,7 +66,7 @@
   </div>
   <div id="status">Type a prompt and press Generate, or upload an image.</div>
   <div class="stage" id="stage">
-    <canvas id="sheet" width="100" height="100"></canvas>
+    <canvas id="sheet" width="500" height="500"></canvas>
     <canvas id="dots"></canvas>
   </div>
   <h2>Archive</h2>
@@ -74,7 +74,7 @@
 </main>
 <footer>Created by Kudratov Olimjon</footer>
 <script>
-const SIZE = 100;
+const SIZE = 500;
 const EXPORT = 1000; // downloads/copies are upscaled with hard pixel edges
 const $ = id => document.getElementById(id);
 const sheet = $('sheet');
@@ -163,7 +163,7 @@ function render() {
 
 // Zoomed view: each black pixel drawn as a circle on white.
 function drawDots(bits) {
-  const scale = 10, c = $('dots');
+  const scale = 2, c = $('dots');
   c.width = c.height = SIZE * scale;
   const g = c.getContext('2d');
   g.fillStyle = '#fff';
