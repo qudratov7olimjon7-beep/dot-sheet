@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dot Sheet</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: #fff; color: #000; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 20px; }
+  h1 { font-size: 20px; margin: 0 0 16px; letter-spacing: .02em; }
+  form, .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  input[type=text] { flex: 1; min-width: 240px; padding: 10px; border: 1px solid #000; font: inherit; }
+  button, select { padding: 9px 14px; border: 1px solid #000; background: #fff; font: inherit; cursor: pointer; }
+  button.primary { background: #000; color: #fff; }
+  button:disabled { opacity: .4; cursor: default; }
+  label { display: inline-flex; gap: 6px; align-items: center; }
+  #status { min-height: 20px; margin-bottom: 12px; }
+  #status.error { color: #000; font-weight: 600; }
+  .stage { border: 1px solid #000; width: 100%; max-width: 1000px; aspect-ratio: 1; overflow: auto; }
+  canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+  #dots { display: none; }
+  .stage.round #sheet { display: none; }
+  .stage.round #dots { display: block; width: 300%; }
+  footer { text-align: center; font-size: 12px; color: #666; padding: 32px 0 24px; border-top: 1px solid #eee; margin-top: 32px; }
+  h2 { font-size: 16px; margin: 28px 0 12px; }
+  #archive { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+  .item { border: 1px solid #000; padding: 6px; }
+  .item img { display: block; width: 100%; image-rendering: pixelated; cursor: pointer; }
+  .item p { margin: 6px 0; font-size: 12px; overflow-wrap: anywhere; }
+  .item small { color: #555; }
+  .item button { padding: 4px 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Dot Sheet</h1>
+  <form id="form">
+    <input id="prompt" type="text" placeholder="Describe an image…" required>
+    <button class="primary" id="generate">Generate</button>
+  </form>
+  <div class="row">
+    <label>Dither
+      <select id="mode">
+        <option value="fs">Floyd–Steinberg</option>
+        <option value="atkinson">Atkinson</option>
+        <option value="threshold">Threshold</option>
+      </select>
+    </label>
+    <label id="thresholdBox">Threshold <input id="threshold" type="range" min="0" max="255" value="128"> <span id="thresholdVal">128</span></label>
+    <label><input id="round" type="checkbox"> Round dots (zoomed)</label>
+    <label>Upload image <input id="file" type="file" accept="image/*"></label>
+    <button id="download" disabled>Download PNG</button>
+  </div>
+  <div id="status">Type a prompt and press Generate, or upload an image.</div>
+  <div class="stage" id="stage">
+    <canvas id="sheet" width="1000" height="1000"></canvas>
+    <canvas id="dots"></canvas>
+  </div>
+  <h2>Archive</h2>
+  <div id="archive"></div>
+</main>
+<footer>Created by Kudratov Olimjon</footer>
+<script>
+const SIZE = 1000;
+const $ = id => document.getElementById(id);
+const sheet = $('sheet');
+const ctx = sheet.getContext('2d', { willReadFrequently: true });
+let gray = null; // Float32Array of luma values for the current source image
+
+ctx.fillStyle = '#fff';
+ctx.fillRect(0, 0, SIZE, SIZE);
+
+function setStatus(text, isError = false) {
+  $('status').textContent = text;
+  $('status').className = isError ? 'error' : '';
+}
+
+function loadImage(src, cors) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    if (cors) img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Image failed to load'));
+    img.src = src;
+  });
+}
+
+// Draw the image cover-fit into 1000x1000 and store its luma.
+function setSource(img) {
+  const c = document.createElement('canvas');
+  c.width = c.height = SIZE;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, SIZE, SIZE);
+  const s = Math.max(SIZE / img.width, SIZE / img.height);
+  const w = img.width * s, h = img.height * s;
+  g.drawImage(img, (SIZE - w) / 2, (SIZE - h) / 2, w, h);
+  const d = g.getImageData(0, 0, SIZE, SIZE).data;
+  gray = new Float32Array(SIZE * SIZE);
+  for (let i = 0; i < gray.length; i++) {
+    gray[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  }
+  render();
+}
+
+const KERNELS = {
+  fs: [[1, 0, 7 / 16], [-1, 1, 3 / 16], [0, 1, 5 / 16], [1, 1, 1 / 16]],
+  atkinson: [[1, 0, 1 / 8], [2, 0, 1 / 8], [-1, 1, 1 / 8], [0, 1, 1 / 8], [1, 1, 1 / 8], [0, 2, 1 / 8]],
+};
+
+// Returns Uint8Array of 0 (black) / 1 (white).
+function dither(mode, threshold) {
+  const out = new Uint8Array(SIZE * SIZE);
+  if (mode === 'threshold') {
+    for (let i = 0; i < out.length; i++) out[i] = gray[i] >= threshold ? 1 : 0;
+    return out;
+  }
+  const buf = Float32Array.from(gray);
+  const kernel = KERNELS[mode];
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const i = y * SIZE + x;
+      const white = buf[i] >= 128;
+      out[i] = white ? 1 : 0;
+      const err = buf[i] - (white ? 255 : 0);
+      for (const [dx, dy, w] of kernel) {
+        const nx = x + dx, ny = y + dy;
+        if (nx >= 0 && nx < SIZE && ny < SIZE) buf[ny * SIZE + nx] += err * w;
+      }
+    }
+  }
+  return out;
+}
+
+function render() {
+  if (!gray) return;
+  const bits = dither($('mode').value, +$('threshold').value);
+  const img = ctx.createImageData(SIZE, SIZE);
+  for (let i = 0; i < bits.length; i++) {
+    const v = bits[i] * 255;
+    img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = v;
+    img.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  if ($('round').checked) drawDots(bits);
+  $('download').disabled = false;
+}
+
+// Zoomed view: each black pixel drawn as a circle on white.
+function drawDots(bits) {
+  const scale = 3, c = $('dots');
+  c.width = c.height = SIZE * scale;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = '#000';
+  g.beginPath();
+  for (let i = 0; i < bits.length; i++) {
+    if (bits[i]) continue;
+    const x = (i % SIZE) * scale + scale / 2, y = Math.floor(i / SIZE) * scale + scale / 2;
+    g.moveTo(x + scale / 2, y);
+    g.arc(x, y, scale / 2, 0, Math.PI * 2);
+  }
+  g.fill();
+}
+
+// ---- Archive (IndexedDB) ----
+const dbReady = new Promise((resolve, reject) => {
+  const req = indexedDB.open('dot-sheet', 1);
+  req.onupgradeneeded = () => req.result.createObjectStore('items', { keyPath: 'id', autoIncrement: true });
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error);
+});
+
+async function store(mode, fn) {
+  const tx = (await dbReady).transaction('items', mode);
+  const req = fn(tx.objectStore('items'));
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve(req.result);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function saveToArchive(prompt) {
+  await store('readwrite', s => s.add({
+    prompt, mode: $('mode').value, threshold: +$('threshold').value,
+    dataURL: sheet.toDataURL('image/png'), created: Date.now(),
+  }));
+  renderArchive();
+}
+
+function downloadURL(url, name) {
+  const a = document.createElement('a');
+  a.download = name;
+  a.href = url;
+  a.click();
+}
+
+async function renderArchive() {
+  const items = (await store('readonly', s => s.getAll())).reverse();
+  const box = $('archive');
+  box.replaceChildren();
+  if (!items.length) box.textContent = 'Nothing saved yet.';
+  for (const item of items) {
+    const el = document.createElement('div');
+    el.className = 'item';
+    el.innerHTML = '<img alt=""><p></p><small></small><div class="row"><button data-a="dl">Download</button><button data-a="del">Delete</button></div>';
+    el.querySelector('img').src = item.dataURL;
+    el.querySelector('p').textContent = item.prompt;
+    el.querySelector('small').textContent = new Date(item.created).toLocaleString() + ' · ' + item.mode;
+    el.querySelector('img').onclick = async () => {
+      setSource(await loadImage(item.dataURL, false));
+      setStatus('Loaded from archive: ' + item.prompt);
+    };
+    el.querySelector('[data-a=dl]').onclick = () => downloadURL(item.dataURL, 'dot-sheet-' + item.id + '.png');
+    el.querySelector('[data-a=del]').onclick = async () => {
+      if (!confirm('Delete "' + item.prompt + '" from the archive?')) return;
+      await store('readwrite', s => s.delete(item.id));
+      renderArchive();
+    };
+    box.append(el);
+  }
+}
+renderArchive();
+
+$('form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const prompt = $('prompt').value.trim();
+  if (!prompt) return;
+  $('generate').disabled = true;
+  setStatus('Generating image… (this can take 10–60 s)');
+  const url = 'https://image.pollinations.ai/prompt/' + encodeURIComponent(prompt) +
+    '?width=1000&height=1000&nologo=true&seed=' + Math.floor(Math.random() * 1e9);
+  try {
+    let img;
+    try { img = await loadImage(url, true); }
+    catch { // free tier is rate limited; retry once after a pause
+      setStatus('Service busy, retrying…');
+      await new Promise(r => setTimeout(r, 8000));
+      img = await loadImage(url, true);
+    }
+    setSource(img);
+    await saveToArchive(prompt);
+    setStatus('Done. Saved to archive.');
+  } catch {
+    setStatus('Could not fetch the image. Check your connection, or upload your own image instead.', true);
+  } finally {
+    $('generate').disabled = false;
+  }
+});
+
+$('file').addEventListener('change', async () => {
+  const f = $('file').files[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  try {
+    setSource(await loadImage(url, false));
+    await saveToArchive(f.name);
+    setStatus('Dithered ' + f.name + '. Saved to archive.');
+  } catch {
+    setStatus('That file could not be read as an image.', true);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+});
+
+function syncThresholdUI() {
+  $('thresholdVal').textContent = $('threshold').value;
+  $('thresholdBox').style.display = $('mode').value === 'threshold' ? '' : 'none';
+}
+$('mode').addEventListener('change', () => { syncThresholdUI(); render(); });
+$('threshold').addEventListener('input', () => { syncThresholdUI(); render(); });
+$('round').addEventListener('change', () => {
+  $('stage').classList.toggle('round', $('round').checked);
+  render();
+});
+$('download').addEventListener('click', () => {
+  downloadURL(sheet.toDataURL('image/png'), 'dot-sheet.png');
+});
+syncThresholdUI();
+</script>
+</body>
+</html>
