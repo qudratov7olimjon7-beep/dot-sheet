@@ -32,7 +32,7 @@
   canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; }
   #dots { display: none; }
   .stage.round #sheet { display: none; }
-  .stage.round #dots { display: block; width: 300%; }
+  .stage.round #dots { display: block; width: 100%; }
   footer { text-align: center; font-size: 12px; color: #888; padding: 32px 0 24px; border-top: 1px solid #222; margin-top: 32px; }
   h2 { font-size: 16px; margin: 28px 0 12px; }
   #archive { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
@@ -59,14 +59,14 @@
       </select>
     </label>
     <label id="thresholdBox">Threshold <input id="threshold" type="range" min="0" max="255" value="128"> <span id="thresholdVal">128</span></label>
-    <label><input id="round" type="checkbox"> Round dots (zoomed)</label>
+    <label><input id="round" type="checkbox"> Round dots</label>
     <label>Upload image <input id="file" type="file" accept="image/*"></label>
     <button id="download" disabled>Download PNG</button>
     <button id="copy" disabled>Copy image</button>
   </div>
   <div id="status">Type a prompt and press Generate, or upload an image.</div>
   <div class="stage" id="stage">
-    <canvas id="sheet" width="1000" height="1000"></canvas>
+    <canvas id="sheet" width="100" height="100"></canvas>
     <canvas id="dots"></canvas>
   </div>
   <h2>Archive</h2>
@@ -74,7 +74,8 @@
 </main>
 <footer>Created by Kudratov Olimjon</footer>
 <script>
-const SIZE = 1000;
+const SIZE = 100;
+const EXPORT = 1000; // downloads/copies are upscaled with hard pixel edges
 const $ = id => document.getElementById(id);
 const sheet = $('sheet');
 const ctx = sheet.getContext('2d', { willReadFrequently: true });
@@ -98,7 +99,7 @@ function loadImage(src, cors) {
   });
 }
 
-// Draw the image cover-fit into 1000x1000 and store its luma.
+// Draw the image cover-fit into SIZE x SIZE and store its luma.
 function setSource(img) {
   const c = document.createElement('canvas');
   c.width = c.height = SIZE;
@@ -162,7 +163,7 @@ function render() {
 
 // Zoomed view: each black pixel drawn as a circle on white.
 function drawDots(bits) {
-  const scale = 3, c = $('dots');
+  const scale = 10, c = $('dots');
   c.width = c.height = SIZE * scale;
   const g = c.getContext('2d');
   g.fillStyle = '#fff';
@@ -288,9 +289,18 @@ $('round').addEventListener('change', () => {
   $('stage').classList.toggle('round', $('round').checked);
   render();
 });
+function bigSheet() {
+  const c = document.createElement('canvas');
+  c.width = c.height = EXPORT;
+  const g = c.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  g.drawImage(sheet, 0, 0, EXPORT, EXPORT);
+  return c;
+}
+
 $('copy').addEventListener('click', () => {
   const b = $('copy');
-  sheet.toBlob(async blob => {
+  bigSheet().toBlob(async blob => {
     try {
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
       b.textContent = 'Copied!';
@@ -302,7 +312,7 @@ $('copy').addEventListener('click', () => {
 });
 
 $('download').addEventListener('click', () => {
-  downloadURL(sheet.toDataURL('image/png'), 'dot-sheet.png');
+  downloadURL(bigSheet().toDataURL('image/png'), 'dot-sheet.png');
 });
 syncThresholdUI();
 </script>
